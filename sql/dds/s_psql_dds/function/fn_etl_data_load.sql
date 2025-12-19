@@ -1,162 +1,75 @@
-create or replace function s_psql_dds.fn_etl_data_load(start_date date, end_date date)
+drop function if exists s_psql_dds.fn_etl_data_load(date, date);
+
+create or replace function s_psql_dds.fn_etl_data_load(
+  p_date_from date,
+  p_date_to   date
+)
 returns void
 language plpgsql
 as $$
 begin
-    -- делаем перезапуск безопасным: чистим диапазон, который будем грузить заново
-    delete from s_psql_dds.t_sql_source_structured
-    where signup_date between start_date and end_date;
-
-    insert into s_psql_dds.t_sql_source_structured (
-        customer_id,
-        full_name,
-        gender,
-        age,
-        city,
-        segment,
-        monthly_income,
-        signup_date,
-        valid_from,
-        valid_to
-    )
+  with src as (
     select
-        -- customer_id: берём только цифры
-        nullif(regexp_replace(customer_id, '[^0-9]', '', 'g'), '')::int as customer_id,
+      u.*,
+      s_psql_dds.try_parse_date(u.signup_date) as signup_dt,
+      s_psql_dds.try_parse_date(u.valid_from)  as valid_from_dt,
+      s_psql_dds.try_parse_date(u.valid_to)    as valid_to_dt
+    from s_psql_dds.t_sql_source_unstructured u
+  ),
+  cleaned as (
+    select
+      case
+        when btrim(customer_id) ~ '^\d+$' then btrim(customer_id)::int
+        else null
+      end as customer_id,
 
-        -- full_name: trim + пустые в null
-        nullif(btrim(full_name), '') as full_name,
+      nullif(btrim(full_name), '') as full_name,
 
-        -- gender: нормализуем варианты
-        case
-            when lower(btrim(gender)) in ('m','male','man','м','муж','мужчина') then 'male'
-            when lower(btrim(gender)) in ('f','female','woman','ж','жен','женщина') then 'female'
-            else null
-        end as gender,
+      case
+        when lower(btrim(gender)) in ('f','female','жен','женщина','w') then 'female'
+        when lower(btrim(gender)) in ('m','male','м','муж','мужчина')   then 'male'
+        else null
+      end as gender,
 
-        -- age: берём цифры и режем диапазон 0..120
-        case
-            when nullif(regexp_replace(age, '[^0-9]', '', 'g'), '') is null then null
-            else least(120, greatest(0, nullif(regexp_replace(age, '[^0-9]', '', 'g'), '')::int))
-        end as age,
+      case
+        when btrim(age) ~ '^\d+$' then btrim(age)::int
+        else null
+      end as age,
 
-        nullif(btrim(city), '') as city,
-        nullif(btrim(segment), '') as segment,
+      nullif(btrim(city), '')    as city,
+      nullif(btrim(segment), '') as segment,
 
-        -- monthly_income: убираем валюты/пробелы, приводим , -> .
-        case
-            when nullif(btrim(monthly_income), '') is null then null
-            else nullif(
-                    regexp_replace(
-                        replace(replace(lower(btrim(monthly_income)), ' ', ''), ',', '.'),
-                        '[^0-9\.]',
-                        '',
-                        'g'
-                    ),
-                    ''
-                 )::numeric(12,2)
-        end as monthly_income,
+      case
+        when btrim(monthly_income) ~ '^\d+([.,]\d+)?$'
+          then replace(btrim(monthly_income), ',', '.')::numeric(12,2)
+        else null
+      end as monthly_income,
 
-        -- signup_date: несколько популярных форматов
-        case
-            when signup_date ~ '^\d{4}-\d{2}-\d{2}$' then to_date(signup_date, 'yyyy-mm-dd')
-            when signup_date ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(signup_date, 'dd.mm.yyyy')
-            when signup_date ~ '^\d{2}/\d{2}/\d{4}$' then to_date(signup_date, 'dd/mm/yyyy')
-            else null
-        end as signup_date,
-
-        -- valid_from
-        case
-            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-            else null
-        end as valid_from,
-
-        -- valid_to (и если valid_to < valid_from — делаем valid_to = valid_from)
-        case
-            when valid_to is null then null
-            when valid_to ~ '^\d{4}-\d{2}-\d{2}$' then
-                case
-                    when (case
-                            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                            else null
-                          end) is not null
-                         and to_date(valid_to, 'yyyy-mm-dd') <
-                             (case
-                                when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                                when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                                when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                                else null
-                              end)
-                    then (case
-                            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                            else null
-                          end)
-                    else to_date(valid_to, 'yyyy-mm-dd')
-                end
-            when valid_to ~ '^\d{2}\.\d{2}\.\d{4}$' then
-                case
-                    when (case
-                            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                            else null
-                          end) is not null
-                         and to_date(valid_to, 'dd.mm.yyyy') <
-                             (case
-                                when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                                when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                                when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                                else null
-                              end)
-                    then (case
-                            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                            else null
-                          end)
-                    else to_date(valid_to, 'dd.mm.yyyy')
-                end
-            when valid_to ~ '^\d{2}/\d{2}/\d{4}$' then
-                case
-                    when (case
-                            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                            else null
-                          end) is not null
-                         and to_date(valid_to, 'dd/mm/yyyy') <
-                             (case
-                                when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                                when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                                when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                                else null
-                              end)
-                    then (case
-                            when valid_from ~ '^\d{4}-\d{2}-\d{2}$' then to_date(valid_from, 'yyyy-mm-dd')
-                            when valid_from ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(valid_from, 'dd.mm.yyyy')
-                            when valid_from ~ '^\d{2}/\d{2}/\d{4}$' then to_date(valid_from, 'dd/mm/yyyy')
-                            else null
-                          end)
-                    else to_date(valid_to, 'dd/mm/yyyy')
-                end
-            else null
-        end as valid_to
-    from s_psql_dds.t_sql_source_unstructured
-    where
-        -- используем параметры периода: грузим только записи, чья signup_date попадает в диапазон
-        (
-            case
-                when signup_date ~ '^\d{4}-\d{2}-\d{2}$' then to_date(signup_date, 'yyyy-mm-dd')
-                when signup_date ~ '^\d{2}\.\d{2}\.\d{4}$' then to_date(signup_date, 'dd.mm.yyyy')
-                when signup_date ~ '^\d{2}/\d{2}/\d{4}$' then to_date(signup_date, 'dd/mm/yyyy')
-                else null
-            end
-        ) between start_date and end_date;
-
+      coalesce(signup_dt, p_date_from)     as signup_date,
+      coalesce(valid_from_dt, p_date_from) as valid_from,
+      coalesce(valid_to_dt, p_date_to)     as valid_to
+    from src
+  )
+  insert into s_psql_dds.t_sql_source_structured
+  (
+    customer_id, full_name, gender, age, city, segment,
+    monthly_income, signup_date, valid_from, valid_to
+  )
+  select
+    customer_id, full_name, gender, age, city, segment,
+    monthly_income, signup_date, valid_from, valid_to
+  from cleaned
+  where customer_id is not null
+    and signup_date between p_date_from and p_date_to
+  on conflict (customer_id) do update set
+    full_name      = excluded.full_name,
+    gender         = excluded.gender,
+    age            = excluded.age,
+    city           = excluded.city,
+    segment        = excluded.segment,
+    monthly_income = excluded.monthly_income,
+    signup_date    = excluded.signup_date,
+    valid_from     = excluded.valid_from,
+    valid_to       = excluded.valid_to;
 end;
 $$;
