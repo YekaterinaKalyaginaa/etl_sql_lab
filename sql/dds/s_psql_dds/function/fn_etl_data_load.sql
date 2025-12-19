@@ -6,9 +6,28 @@ returns void
 language plpgsql
 as $$
 begin
-    -- ВАЖНО: никаких to_date(...) на сырых строках.
-    -- Только try_parse_date(), которая возвращает NULL, если дата мусорная.
+    with src as (
+        select
+            -- чистим customer_id один раз
+            nullif(regexp_replace(customer_id, '[^0-9]', '', 'g'), '') as customer_id_clean,
 
+            full_name,
+            gender,
+            age,
+            city,
+            segment,
+            monthly_income,
+
+            signup_date,
+            valid_from,
+            valid_to,
+
+            -- парсим даты безопасно один раз
+            s_psql_dds.try_parse_date(signup_date) as signup_dt,
+            s_psql_dds.try_parse_date(valid_from)  as valid_from_dt,
+            s_psql_dds.try_parse_date(valid_to)    as valid_to_dt
+        from s_psql_dds.t_sql_source_unstructured
+    )
     insert into s_psql_dds.t_sql_source_structured (
         customer_id,
         full_name,
@@ -22,20 +41,16 @@ begin
         valid_to
     )
     select
-        -- customer_id: берём только цифры
-        nullif(regexp_replace(customer_id, '[^0-9]', '', 'g'), '')::int as customer_id,
+        customer_id_clean::int as customer_id,
 
-        -- full_name: trim + пустые в null
         nullif(btrim(full_name), '') as full_name,
 
-        -- gender: нормализуем варианты
         case
             when lower(btrim(gender)) in ('m','male','man','м','муж','мужчина') then 'male'
             when lower(btrim(gender)) in ('f','female','woman','ж','жен','женщина') then 'female'
             else null
         end as gender,
 
-        -- age: берём цифры и режем диапазон 0..120
         case
             when nullif(regexp_replace(age, '[^0-9]', '', 'g'), '') is null then null
             else least(120, greatest(0, nullif(regexp_replace(age, '[^0-9]', '', 'g'), '')::int))
@@ -44,7 +59,6 @@ begin
         nullif(btrim(city), '') as city,
         nullif(btrim(segment), '') as segment,
 
-        -- monthly_income: убираем валюты/пробелы, приводим , -> .
         case
             when nullif(btrim(monthly_income), '') is null then null
             else nullif(
@@ -58,26 +72,22 @@ begin
                  )::numeric(12,2)
         end as monthly_income,
 
-        -- signup_date: безопасно
-        s_psql_dds.try_parse_date(signup_date) as signup_date,
+        signup_dt as signup_date,
+        valid_from_dt as valid_from,
 
-        -- valid_from: безопасно
-        s_psql_dds.try_parse_date(valid_from) as valid_from,
-
-        -- valid_to: безопасно + если valid_to < valid_from → делаем valid_to = valid_from
         case
-            when s_psql_dds.try_parse_date(valid_to) is null then null
-            when s_psql_dds.try_parse_date(valid_from) is not null
-                 and s_psql_dds.try_parse_date(valid_to) < s_psql_dds.try_parse_date(valid_from)
-            then s_psql_dds.try_parse_date(valid_from)
-            else s_psql_dds.try_parse_date(valid_to)
+            when valid_to_dt is null then null
+            when valid_from_dt is not null and valid_to_dt < valid_from_dt then valid_from_dt
+            else valid_to_dt
         end as valid_to
 
-    from s_psql_dds.t_sql_source_unstructured
-
+    from src
     where
-        -- фильтр по периоду ТОЛЬКО через безопасный парсер
-        s_psql_dds.try_parse_date(signup_date) between start_date and end_date
+        -- 1) customer_id обязателен (иначе PK/NOT NULL)
+        customer_id_clean is not null
+
+        -- 2) фильтр по периоду тоже через безопасный парсер
+        and signup_dt between start_date and end_date
 
     on conflict (customer_id) do update set
         full_name      = excluded.full_name,
@@ -89,6 +99,5 @@ begin
         signup_date    = excluded.signup_date,
         valid_from     = excluded.valid_from,
         valid_to       = excluded.valid_to;
-
 end;
 $$;
