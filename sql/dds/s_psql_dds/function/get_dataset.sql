@@ -2,12 +2,14 @@ create schema if not exists s_psql_dds;
 
 drop function if exists s_psql_dds.get_dataset(integer);
 
-create or replace function s_psql_dds.get_dataset(p_rows integer)
+create or replace function s_psql_dds.get_dataset(p_rows integer default 100)
 returns void
 language plpgsql
 as $$
 declare
     i int;
+    base_id int;
+
     v_full_name text;
     v_gender text;
     v_age text;
@@ -17,95 +19,62 @@ declare
     v_signup text;
     v_valid_from text;
     v_valid_to text;
+
+    names text[] := array[
+        'Ivan Petrov','Anna-Maria','Ekaterina Kalagina','Oleg123','Test User','   ',
+        'Dmitry','Svetlana Ivanova','John Doe','Мария Петрова'
+    ];
+
+    genders text[] := array['M','F','male','female','man','woman','м','ж','МУЖ','ЖЕН','??',''];
+    cities  text[] := array['Omsk','omsk','SPb','Ekb','Kazan','', '  ', 'Moscow'];
+    segments text[] := array['A','B','C','vip','VIP','??','', '  '];
+
+    -- разные “грязные” форматы денег, включая такие, которые раньше тебя роняли
+    incomes text[] := array[
+        '1000.50','1 000,50','5000','12.345.67','25 000 руб.','USD 1234.56','', '  ', '10,000.00'
+    ];
+
+    -- даты: нормальные, разные форматы, и намеренно сломанные
+    dates text[] := array[
+        '2025-12-19','19.12.2025','19/12/2025',
+        '32.13.2025','99/99/9999','', '  '
+    ];
 begin
     if p_rows is null or p_rows <= 0 then
         return;
     end if;
 
     for i in 1..p_rows loop
-        -- имя (часть пустых/битых)
-        v_full_name := (array[
-            'Ivan Petrov',
-            'Anna-Maria',
-            'Ekaterina Kalyagina',
-            'Oleg123',
-            '   ',
-            null,
-            'Test User'
-        ])[1 + floor(random()*7)::int];
+        base_id := 100000 + i;  -- ВАЖНО: уникальные цифры, чтобы после очистки не было дублей
 
-        -- пол (часть мусора)
-        v_gender := (array[
-            'M','F','male','female','м','ж','жен','??',null,''
-        ])[1 + floor(random()*10)::int];
-
-        -- возраст (часть мусора)
-        v_age := (array[
-            '23','18 лет','-5','0','120','999','abc','5',null,''
-        ])[1 + floor(random()*10)::int];
-
-        -- город (часть мусора/разный регистр)
-        v_city := (array[
-            'Omsk','omsk','Kazan','Ekb','   ',null
-        ])[1 + floor(random()*6)::int];
-
-        -- сегмент (часть мусора)
-        v_segment := (array[
-            'A','B','C','vip','??','',null
-        ])[1 + floor(random()*7)::int];
-
-        -- доход (часть мусора/несколько точек)
-        v_income := (array[
-            '1000.50',
-            '1 000,50 руб',
-            '12.345.67',
-            '$5000',
-            '0',
-            'abc',
-            null,
-            ''
+        v_full_name := names[1 + floor(random() * array_length(names, 1))::int];
+        v_gender    := genders[1 + floor(random() * array_length(genders, 1))::int];
+        v_age       := (array[
+            (floor(random()*90)+5)::int::text,
+            '0', '120', '150', '-5', '5 лет', '??', ''
         ])[1 + floor(random()*8)::int];
 
-        -- signup_date: часть нормальная, часть битая
-        -- важно: ДАТЫ ТУТ СТРОКОЙ (это staging!)
-        if random() < 0.70 then
-            -- нормальная дата в пределах +/- 3 дней от текущей
-            if random() < 0.5 then
-                v_signup := to_char(current_date - (floor(random()*7)::int - 3), 'YYYY-MM-DD');
-            else
-                v_signup := to_char(current_date - (floor(random()*7)::int - 3), 'DD.MM.YYYY');
-            end if;
-        else
-            v_signup := (array[
-                '32.13.2025',
-                '2025-99-99',
-                'not_a_date',
-                null,
-                ''
-            ])[1 + floor(random()*5)::int];
-        end if;
+        v_city      := cities[1 + floor(random() * array_length(cities, 1))::int];
+        v_segment   := segments[1 + floor(random() * array_length(segments, 1))::int];
+        v_income    := incomes[1 + floor(random() * array_length(incomes, 1))::int];
 
-        -- valid_from / valid_to: тоже строкой, иногда криво
-        if random() < 0.75 then
-            v_valid_from := to_char(current_date - floor(random()*30)::int, 'YYYY-MM-DD');
-        else
-            v_valid_from := (array['32.13.2025','bad',null,''])[1 + floor(random()*4)::int];
-        end if;
+        v_signup    := dates[1 + floor(random() * array_length(dates, 1))::int];
+        v_valid_from:= dates[1 + floor(random() * array_length(dates, 1))::int];
+        v_valid_to  := dates[1 + floor(random() * array_length(dates, 1))::int];
 
-        if random() < 0.75 then
-            v_valid_to := to_char(current_date + floor(random()*60)::int, 'DD/MM/YYYY');
-        else
-            v_valid_to := (array['32.13.2025','bad',null,''])[1 + floor(random()*4)::int];
-        end if;
+        -- добавим “грязь” пробелами иногда
+        if random() < 0.2 then v_full_name := '  ' || v_full_name || ' '; end if;
+        if random() < 0.2 then v_city := v_city || '  '; end if;
 
         insert into s_psql_dds.t_sql_source_unstructured
             (customer_id, full_name, gender, age, city, segment, monthly_income, signup_date, valid_from, valid_to)
         values
             (
-                -- customer_id делаем намеренно грязным (иногда буквы)
+                -- оставляем цифры уникальными, но добавим мусор вокруг (после очистки всё равно будет base_id)
                 case
-                    when random() < 0.85 then (100000 + i)::text
-                    else 'ID-' || (100000 + i)::text
+                    when random() < 0.3 then 'ID-' || base_id::text
+                    when random() < 0.6 then base_id::text || 'x'
+                    else base_id::text
                 end,
                 v_full_name,
                 v_gender,
@@ -118,5 +87,6 @@ begin
                 v_valid_to
             );
     end loop;
+
 end;
 $$;
