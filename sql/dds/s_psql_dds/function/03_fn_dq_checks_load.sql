@@ -1,7 +1,3 @@
-create or replace function s_psql_dds.fn_dq_checks_load(start_dt date, end_dt date)
-returns void
-language plpgsql
-as $$
 create schema if not exists s_psql_dds;
 
 create or replace function s_psql_dds.fn_dq_checks_load(start_dt date, end_dt date)
@@ -13,14 +9,11 @@ declare
   v_src bigint;
   v_dm  bigint;
 begin
-  -- Чтобы результаты не копились бесконечно: чистим проверки за сегодня по витрине (можно убрать, если не хочешь)
   delete from s_psql_dds.t_dq_check_results
   where table_name = 's_psql_dm.v_dm_task'
     and execution_date::date = current_date;
 
-  -- =========================================================
-  -- CHECK 1: COMPLETENESS (полнота) — критичное поле customer_id не должно быть NULL
-  -- =========================================================
+  -- 1) completeness_customer_id
   begin
     select count(*) into v_cnt
     from s_psql_dm.v_dm_task
@@ -39,9 +32,7 @@ begin
     values ('completeness_customer_id', 's_psql_dm.v_dm_task', 'error', sqlerrm);
   end;
 
-  -- =========================================================
-  -- CHECK 2: UNIQUENESS (уникальность) — customer_id должен быть уникален в витрине
-  -- =========================================================
+  -- 2) uniqueness_customer_id
   begin
     select count(*) into v_cnt
     from (
@@ -64,10 +55,7 @@ begin
     values ('uniqueness_customer_id', 's_psql_dm.v_dm_task', 'error', sqlerrm);
   end;
 
-  -- =========================================================
-  -- CHECK 3: VALIDITY (валидность) — segment_id должен ссылаться на справочник и НЕ быть "??"
-  -- (у тебя "??" реально есть — поэтому это будет failed, и это нормально для демонстрации DQ)
-  -- =========================================================
+  -- 3) validity_segment
   begin
     select count(*) into v_cnt
     from s_psql_dm.v_dm_task d
@@ -89,9 +77,7 @@ begin
     values ('validity_segment', 's_psql_dm.v_dm_task', 'error', sqlerrm);
   end;
 
-  -- =========================================================
-  -- CHECK 4: CONSISTENCY (непротиворечивость) — если valid_to есть, то valid_from тоже должен быть и valid_to >= valid_from
-  -- =========================================================
+  -- 4) consistency_valid_dates
   begin
     select count(*) into v_cnt
     from s_psql_dm.v_dm_task
@@ -111,10 +97,7 @@ begin
     values ('consistency_valid_dates', 's_psql_dm.v_dm_task', 'error', sqlerrm);
   end;
 
-  -- =========================================================
-  -- CHECK 5: ACCURACY/RECONCILIATION (правильность) — сравним количество строк structured vs dm за период
-  -- (не всегда 1-в-1 из-за NULL сегментов/джойнов, но у тебя обычно совпадает)
-  -- =========================================================
+  -- 5) accuracy_rowcount_structured_vs_dm
   begin
     select count(*) into v_src
     from s_psql_dds.t_sql_source_structured
@@ -137,6 +120,4 @@ begin
   end;
 
 end;
-$$;
-
 $$;
