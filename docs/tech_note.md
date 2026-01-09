@@ -113,16 +113,18 @@
 ```sql
 select s_psql_dds.get_dataset(300);
 select s_psql_dds.fn_etl_data_load('1900-01-01', '2100-01-01');
+```
 
 ### Шаг 2. Формирование витрины (DM)
 ```sql
 select s_psql_dm.fn_dm_data_load('1900-01-01', '2100-01-01');
-
+```
 ### Шаг 3. Контроль качества данных (DQ)
 ```sql
 select s_psql_dds.fn_dq_checks_load('1900-01-01', '2100-01-01');
 select * from s_psql_dds.v_dq_dashboard;
 select * from s_psql_dds.v_dq_alert;
+```
 
 
 
